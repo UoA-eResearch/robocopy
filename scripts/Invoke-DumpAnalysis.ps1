@@ -18,14 +18,18 @@ param(
 $ErrorActionPreference = 'Stop'
 
 function Find-Cdb {
+    # Prefer the debugger matching this machine's architecture; x64 also runs under emulation on ARM64.
+    $arches = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { @('arm64', 'x64') } else { @('x64') }
     $candidates = @()
     foreach ($root in @("${env:ProgramFiles(x86)}\Windows Kits", "$env:ProgramFiles\Windows Kits")) {
         if (Test-Path $root) {
-            $candidates += Get-ChildItem -Path $root -Recurse -Filter cdb.exe -ErrorAction SilentlyContinue |
-                Where-Object { $_.FullName -match '\\Debuggers\\x64\\cdb\.exe$' } | Select-Object -ExpandProperty FullName
+            $candidates += Get-ChildItem -Path $root -Recurse -Filter cdb.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
         }
     }
-    if ($candidates) { return ($candidates | Sort-Object | Select-Object -Last 1) }
+    foreach ($arch in $arches) {
+        $hit = $candidates | Where-Object { $_ -match ('\\Debuggers\\{0}\\cdb\.exe$' -f $arch) } | Sort-Object | Select-Object -Last 1
+        if ($hit) { return $hit }
+    }
     $onPath = Get-Command cdb.exe -ErrorAction SilentlyContinue
     if ($onPath) { return $onPath.Source }
     return $null

@@ -10,7 +10,7 @@ on:
     inputs:
       runners:
         description: 'JSON list of Windows runner labels'
-        default: '["windows-2022", "windows-2025"]'
+        default: '["windows-2022", "windows-2025", "windows-11-arm"]'
         type: string
       disruptions:
         description: 'JSON list of disruption methods: tcp-reset-storm, smb-session-close, server-restart, none'
@@ -63,7 +63,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.runners || '["windows-2022", "windows-2025"]') }}
+        os: ${{ fromJSON(inputs.runners || '["windows-2022", "windows-2025", "windows-11-arm"]') }}
         disruption: ${{ fromJSON(inputs.disruptions || '["tcp-reset-storm", "smb-session-close"]') }}
         mode: [restartable, standard]
     runs-on: ${{ matrix.os }}

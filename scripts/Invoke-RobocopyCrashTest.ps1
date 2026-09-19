@@ -83,6 +83,7 @@ function Get-EnvironmentInfo {
         osProductName    = $cv.ProductName
         osDisplayVersion = $cv.DisplayVersion
         osBuild          = ('{0}.{1}' -f $cv.CurrentBuildNumber, $cv.UBR)
+        architecture     = $env:PROCESSOR_ARCHITECTURE
         robocopyPath     = $rc.FullName
         robocopyVersion  = $rc.VersionInfo.FileVersion
         robocopyProduct  = $rc.VersionInfo.ProductVersion
@@ -181,7 +182,9 @@ function Initialize-CrashDumps([string]$DumpDir) {
 
 function Get-ProcDump([string]$ToolDir) {
     New-Item -ItemType Directory -Force -Path $ToolDir | Out-Null
-    $exe = Join-Path $ToolDir 'procdump64.exe'
+    # The Sysinternals zip ships procdump64.exe (x64) and procdump64a.exe (ARM64).
+    $name = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'procdump64a.exe' } else { 'procdump64.exe' }
+    $exe = Join-Path $ToolDir $name
     if (Test-Path $exe) { return $exe }
     try {
         Write-Step 'Downloading Sysinternals ProcDump'

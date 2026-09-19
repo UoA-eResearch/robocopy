@@ -36,9 +36,9 @@ if (-not $trials) {
     L
     $envs = @($trials | ForEach-Object { $_.environment } | Where-Object { $_ } | Group-Object label)
     if ($envs) {
-        L '| Runner | OS | Build | robocopy.exe version |'
-        L '|---|---|---|---|'
-        foreach ($g in $envs) { $e = $g.Group[0]; L ("| {0} | {1} {2} | {3} | {4} |" -f $e.label, $e.osProductName, $e.osDisplayVersion, $e.osBuild, $e.robocopyVersion) }
+        L '| Runner | OS | Build | Arch | robocopy.exe version |'
+        L '|---|---|---|---|---|'
+        foreach ($g in $envs) { $e = $g.Group[0]; L ("| {0} | {1} {2} | {3} | {4} | {5} |" -f $e.label, $e.osProductName, $e.osDisplayVersion, $e.osBuild, (Prop $e 'architecture'), $e.robocopyVersion) }
         L
     }
 

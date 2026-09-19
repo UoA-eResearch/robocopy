@@ -63,8 +63,9 @@ run summary and uploads it as `comparison.md`.
 
 ## Running it
 
-**Actions > Robocopy /Z crash reproduction > Run workflow.** Defaults: `windows-2022` and
-`windows-2025`, disruptions `tcp-reset-storm` and `smb-session-close`, 3 trials per job,
+**Actions > Robocopy /Z crash reproduction > Run workflow.** Defaults: `windows-2022`,
+`windows-2025` and `windows-11-arm` (a Windows 11 client build, the closest hosted runner to the
+Windows 10 client in the field), disruptions `tcp-reset-storm` and `smb-session-close`, 3 trials per job,
 512 MB file, 12 s storm. Inputs let you change runners, disruption methods, number of trials,
 trigger percentages, file size, storm length, retry options, extra robocopy options
 (for example `/MT:8` or `/IPG:2`) and the dump-capture mode. The workflow also runs on

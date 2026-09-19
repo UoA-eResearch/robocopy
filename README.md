@@ -104,15 +104,17 @@ The harness creates a share called `rccrash`, writes WER LocalDumps registry val
 
 ## Results so far
 
-Two full runs on hosted runners (3 trials per cell, 512 MB file, 12 s disruption,
-`/R:5 /W:5`; the second run with reset grace delays of 0, 10 and 100 ms across the trials):
+Three full runs on hosted runners (3 trials per cell, 512 MB file, 12 s disruption,
+`/R:5 /W:5`; the later runs with reset grace delays of 0, 10 and 100 ms across the trials):
 
 | Runner | robocopy.exe | Disruption | `/Z` trials | no-`/Z` trials |
 |---|---|---|---|---|
-| windows-2022 (Server 2022, 20348) | 10.0.20348.1 | tcp-reset-storm | 6 recovered, 0 crashed | 6 recovered, 0 crashed |
-| windows-2022 | 10.0.20348.1 | smb-session-close | 6 recovered, 0 crashed | 6 recovered, 0 crashed |
-| windows-2025 (Server 2025, 26100) | 10.0.26100.1 | tcp-reset-storm | 6 recovered, 0 crashed | 6 recovered, 0 crashed |
-| windows-2025 | 10.0.26100.1 | smb-session-close | 6 recovered, 0 crashed | 6 recovered, 0 crashed |
+| windows-2022 (Server 2022, 20348) | 10.0.20348.1 | tcp-reset-storm | 9 recovered, 0 crashed | 9 recovered, 0 crashed |
+| windows-2022 | 10.0.20348.1 | smb-session-close | 9 recovered, 0 crashed | 9 recovered, 0 crashed |
+| windows-2025 (Server 2025, 26100) | 10.0.26100.1 | tcp-reset-storm | 9 recovered, 0 crashed | 9 recovered, 0 crashed |
+| windows-2025 | 10.0.26100.1 | smb-session-close | 9 recovered, 0 crashed | 9 recovered, 0 crashed |
+| windows-11-arm (Windows 11 client, 26200, ARM64) | 10.0.26100.1 | tcp-reset-storm | 3 recovered, 0 crashed | 3 recovered, 0 crashed |
+| windows-11-arm | 10.0.26100.1 | smb-session-close | 3 recovered, 0 crashed | 3 recovered, 0 crashed |
 
 What the run showed:
 
@@ -121,16 +123,18 @@ What the run showed:
   was logged at the trigger percentage, robocopy waited `/W`, retried inside the window, was
   hit again, and finished once the window ended. Exit code 1, summary table printed,
   destination hash correct, in both modes.
-- No crash, no Event 1000, no dump, on either Server build, in either mode. The `/Z`
-  crash seen in the field on Windows 10 22H2 (robocopy 10.0.19041) was not reproduced by
-  a loopback reset on these builds. That is evidence, not proof: the hosted runners cannot
+- No crash, no Event 1000, no dump, on either Server build or on the Windows 11 ARM64
+  client build, in either mode. The `/Z` crash seen in the field on Windows 10 22H2
+  (robocopy 10.0.19041) was not reproduced by a loopback reset on these builds. That is evidence, not proof: the hosted runners cannot
   run the Windows 10 binary, so run the harness by hand on a Windows 10 machine (see above)
   to test the exact build.
 - With `/Z` the destination file is pre-extended to its full size as soon as the copy starts,
   which is why the harness measures progress from the process's I/O counters rather than
   the destination file size.
 - `/Z` is much slower even on loopback: 25 % of the file took about 1.6 s with `/Z` versus
-  about 0.1 s without.
+  about 0.1 s without on Server 2022, and about 16 s with `/Z` on the ARM64 Windows 11 runner
+  (roughly 6 to 12 MB/s). The registry on that image reports the product name as
+  "Windows 10 Enterprise" although the build (26200) is Windows 11.
 - The SMB redirector only attempted 3 reconnects per 12 s window, one per robocopy retry,
   whether the reset landed 1 ms, 15 ms or 108 ms after the reconnect. The field capture
   showed the client reconnecting hundreds of times in 10 s, so something on that client

@@ -331,8 +331,8 @@ Write-Step ("{0} build {1}, robocopy {2}" -f $envInfo.osProductName, $envInfo.os
 
 $werInfo = Initialize-CrashDumps $dumpDir
 $useProcDump = ($ProcDump -eq 'on') -or (($ProcDump -eq 'auto') -and $werInfo.policyDisabled)
-$procdump = if ($useProcDump) { Get-ProcDump $toolDir } else { $null }
-$envInfo.wer = $werInfo; $envInfo.procDumpMode = $ProcDump; $envInfo.procDumpAttached = [bool]$procdump
+$procdumpExe = if ($useProcDump) { Get-ProcDump $toolDir } else { $null }
+$envInfo.wer = $werInfo; $envInfo.procDumpMode = $ProcDump; $envInfo.procDumpAttached = [bool]$procdumpExe
 $envInfo | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $OutputDir 'environment.json')
 $big = Initialize-SourceData $srcDir $FileSizeMB $SmallFiles
 $bigHash = (Get-FileHash $big -Algorithm SHA256).Hash
@@ -360,10 +360,10 @@ try {
         $sw = [Diagnostics.Stopwatch]::StartNew()
         $proc = Start-Process -FilePath 'robocopy.exe' -ArgumentList $argLine -PassThru -NoNewWindow -RedirectStandardOutput $log -RedirectStandardError $errLog
         $pdProc = $null
-        if ($procdump) {
+        if ($procdumpExe) {
             # Second-chance (unhandled) exceptions produce a full dump via the debugger API,
             # independent of WER policy on the machine.
-            $pdProc = Start-Process -FilePath $procdump -ArgumentList ('-accepteula -e -ma {0} "{1}"' -f $proc.Id, $dumpDir) -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $trialDir 'procdump.log')
+            $pdProc = Start-Process -FilePath $procdumpExe -ArgumentList ('-accepteula -e -ma {0} "{1}"' -f $proc.Id, $dumpDir) -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $trialDir 'procdump.log')
         }
 
         # Wait until robocopy has written the requested share of the big file.

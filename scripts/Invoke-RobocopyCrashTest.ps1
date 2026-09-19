@@ -38,6 +38,10 @@ param(
     # How long the disruption keeps hitting the connection. Should exceed /W so that at
     # least one robocopy retry lands inside the disruption window.
     [int]$StormSeconds = 12,
+    # tcp-reset-storm only: leave each new connection alone for this many ms before resetting
+    # it, so the reconnect gets through negotiate/authentication first. Trial i uses
+    # ResetGraceMs[(i-1) mod n].
+    [int[]]$ResetGraceMs = @(0),
     [string]$RetryArgs = '/R:5 /W:5',
     [string]$ExtraArgs = '',
     [string]$Label = $env:COMPUTERNAME,
@@ -191,15 +195,15 @@ function Get-ProcDump([string]$ToolDir) {
     return $null
 }
 
-function Invoke-Disruption([string]$Kind, [int]$Seconds) {
+function Invoke-Disruption([string]$Kind, [int]$Seconds, [int]$GraceMs) {
     $sw = [Diagnostics.Stopwatch]::StartNew()
     switch ($Kind) {
         'tcp-reset-storm' {
             # Abort every client-side TCP connection to port 445 every 2 ms for the window.
-            $r = [RcNet]::Storm(445, $Seconds * 1000, 2, $false)
+            $r = [RcNet]::Storm(445, $Seconds * 1000, 2, $false, $GraceMs)
             $first = if ($r.Records.Count) { $r.Records[0].ElapsedMs } else { $null }
             return [ordered]@{
-                kind = $Kind; durationMs = $r.DurationMs; iterations = $r.Iterations
+                kind = $Kind; durationMs = $r.DurationMs; iterations = $r.Iterations; graceMs = $GraceMs
                 resets = $r.Resets; failures = $r.Failures; firstResetMs = $first
                 sample = @($r.Records | Select-Object -First 25 | ForEach-Object {
                         [ordered]@{ t = $_.ElapsedMs; local = "$($_.LocalAddr):$($_.LocalPort)"; remote = "$($_.RemoteAddr):$($_.RemotePort)"; state = $_.State; result = $_.Result } })
@@ -344,6 +348,7 @@ $results = @()
 try {
     for ($t = 1; $t -le $Trials; $t++) {
         $pct = $TriggerPercents[($t - 1) % $TriggerPercents.Count]
+        $grace = $ResetGraceMs[($t - 1) % $ResetGraceMs.Count]
         $trialDir = Join-Path $OutputDir ("trial-{0}" -f $t)
         New-Item -ItemType Directory -Force -Path $trialDir | Out-Null
         Get-ChildItem $dstDir -Force | Remove-Item -Recurse -Force
@@ -354,7 +359,7 @@ try {
         $argLine = ('"{0}" "{1}" /E /COPY:DAT /DCOPY:T {2} {3} {4}' -f $srcDir, $unc, $modeArg, $RetryArgs, $ExtraArgs) -replace '\s+', ' '
         $threshold = [uint64]($FileSizeMB * 1MB * $pct / 100)
 
-        Write-Step ("=== Trial {0}/{1}: mode={2} disruption={3} trigger={4}% ({5:N0} bytes) ===" -f $t, $Trials, $Mode, $Disruption, $pct, $threshold)
+        Write-Step ("=== Trial {0}/{1}: mode={2} disruption={3} trigger={4}% ({5:N0} bytes) resetGrace={6}ms ===" -f $t, $Trials, $Mode, $Disruption, $pct, $threshold, $grace)
         Write-Step "robocopy $argLine"
         $t0 = Get-Date
         $sw = [Diagnostics.Stopwatch]::StartNew()
@@ -379,7 +384,7 @@ try {
         if ($triggered) {
             try { $destSizeAtTrigger = (Get-Item (Join-Path $dstDir 'big.bin') -ErrorAction Stop).Length } catch { }
             Write-Step ("Trigger at {0} ms: robocopy has written {1:N0} bytes ({2:N1}% of big file), dest size {3}; starting {4} for {5}s" -f $triggerMs, $written, ($written * 100.0 / ($FileSizeMB * 1MB)), $destSizeAtTrigger, $Disruption, $StormSeconds)
-            $disruptionInfo = Invoke-Disruption $Disruption $StormSeconds
+            $disruptionInfo = Invoke-Disruption $Disruption $StormSeconds $grace
             Write-Step ("Disruption finished: {0}" -f (($disruptionInfo | ConvertTo-Json -Compress -Depth 3) -replace '"sample":\[.*\]', '"sample":[...]'))
         } else {
             Write-Warning ("robocopy exited after {0} ms before reaching the trigger ({1:N0} bytes written). Use a larger -FileSizeMB." -f $triggerMs, $written)
@@ -427,6 +432,7 @@ try {
             commandLine          = "robocopy $argLine"
             fileSizeMB           = $FileSizeMB
             triggerPercent       = $pct
+            resetGraceMs         = $grace
             triggered            = $triggered
             triggerMs            = $triggerMs
             bytesWrittenAtTrigger = $written

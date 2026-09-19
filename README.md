@@ -43,7 +43,10 @@ mode (`restartable` = with `/Z`, `standard` = without). Each job runs
    - `tcp-reset-storm` (default): every 2 ms, every client-side TCP connection to port 445 is
      aborted with `SetTcpEntry(MIB_TCP_STATE_DELETE_TCB)`, which sends a TCP RST to the peer.
      Each reconnect the SMB redirector makes is reset again, the same shape as a
-     brute-force block on a network device.
+     brute-force block on a network device. `reset_grace_ms` (default `0,10,100`, cycled per
+     trial) lets each reconnect live that long before it is reset, so negotiate and
+     authentication complete and the copy briefly resumes, as seen from a device that
+     resets a few milliseconds after the authenticate.
    - `smb-session-close`: `Close-SmbSession -Force` on the server side in a loop.
    - `server-restart`: restarts the Server (LanmanServer) service once.
    - `none`: control run.
@@ -97,6 +100,40 @@ The harness creates a share called `rccrash`, writes WER LocalDumps registry val
   file or the other disruption method.
 - **Hash OK**: whether the destination file is byte-identical to the source, which checks
   that a `/Z` resume actually resumed at the right offset.
+
+## Results so far
+
+First full run (3 trials per cell, 512 MB file, 12 s disruption, `/R:5 /W:5`, resets with no
+grace delay):
+
+| Runner | robocopy.exe | Disruption | `/Z` trials | no-`/Z` trials |
+|---|---|---|---|---|
+| windows-2022 (Server 2022, 20348) | 10.0.20348.1 | tcp-reset-storm | 3 recovered, 0 crashed | 3 recovered, 0 crashed |
+| windows-2022 | 10.0.20348.1 | smb-session-close | 3 recovered, 0 crashed | 3 recovered, 0 crashed |
+| windows-2025 (Server 2025, 26100) | 10.0.26100.1 | tcp-reset-storm | 3 recovered, 0 crashed | 3 recovered, 0 crashed |
+| windows-2025 | 10.0.26100.1 | smb-session-close | 3 recovered, 0 crashed | 3 recovered, 0 crashed |
+
+What the run showed:
+
+- Every trial hit the disruption where intended: the first `ERROR 59 (0x0000003B) An
+  unexpected network error occurred` (or `ERROR 6 The handle is invalid` for session closes)
+  was logged at the trigger percentage, robocopy waited `/W`, retried inside the window, was
+  hit again, and finished once the window ended. Exit code 1, summary table printed,
+  destination hash correct, in both modes.
+- No crash, no Event 1000, no dump, on either Server build, in either mode. The `/Z`
+  crash seen in the field on Windows 10 22H2 (robocopy 10.0.19041) was not reproduced by
+  a loopback reset on these builds. That is evidence, not proof: the hosted runners cannot
+  run the Windows 10 binary, so run the harness by hand on a Windows 10 machine (see above)
+  to test the exact build.
+- With `/Z` the destination file is pre-extended to its full size as soon as the copy starts,
+  which is why the harness measures progress from the process's I/O counters rather than
+  the destination file size.
+- `/Z` is much slower even on loopback: 25 % of the file took about 1.6 s with `/Z` versus
+  about 0.1 s without.
+- With no grace delay the SMB redirector only attempted 3 reconnects in 12 s, one per
+  robocopy retry; the field capture showed the client reconnecting hundreds of times because
+  each reconnect got through authentication first. `reset_grace_ms` was added after this run
+  to reproduce that.
 
 ## Caveats
 

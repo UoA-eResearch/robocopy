@@ -105,21 +105,34 @@ public static class RcNet
     /// For durationMs, every intervalMs, abort every TCP connection whose remote port is `port`
     /// (i.e. every client-side SMB connection when port == 445). Each new reconnect the SMB
     /// redirector makes is reset again, like a brute-force block on a security device.
-    public static StormResult Storm(int port, int durationMs, int intervalMs, bool includeServerSide)
+    /// graceMs > 0 leaves each connection alone until it has existed for that long, so the
+    /// reconnect can finish negotiate/session setup (and even copy a little) before the reset
+    /// lands - the pattern seen from a network device that resets shortly after authentication.
+    public static StormResult Storm(int port, int durationMs, int intervalMs, bool includeServerSide, int graceMs)
     {
         var result = new StormResult();
         var sw = Stopwatch.StartNew();
+        var firstSeen = new Dictionary<string, double>();
         while (sw.ElapsedMilliseconds < durationMs)
         {
             result.Iterations++;
             List<MIB_TCPROW> rows;
             try { rows = GetRows(); } catch { Thread.Sleep(intervalMs); continue; }
+            double now = sw.Elapsed.TotalMilliseconds;
             foreach (var row in rows)
             {
                 int rp = Port(row.dwRemotePort), lp = Port(row.dwLocalPort);
                 bool match = rp == port || (includeServerSide && lp == port);
                 if (!match) continue;
                 if (row.dwState == MIB_TCP_STATE_LISTEN || row.dwState == MIB_TCP_STATE_TIME_WAIT) continue;
+                if (graceMs > 0)
+                {
+                    string key = row.dwLocalAddr + ":" + lp + ">" + row.dwRemoteAddr + ":" + rp;
+                    double seen;
+                    if (!firstSeen.TryGetValue(key, out seen)) { firstSeen[key] = now; continue; }
+                    if (now - seen < graceMs) continue;
+                    firstSeen.Remove(key);
+                }
                 var r = row;
                 r.dwState = MIB_TCP_STATE_DELETE_TCB;
                 uint res = SetTcpEntry(ref r);

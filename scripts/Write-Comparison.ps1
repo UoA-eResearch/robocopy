@@ -81,7 +81,10 @@ if (-not $trials) {
     L '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|'
     foreach ($t in $trials) {
         $di = $t.disruptionInfo
-        $hits = if ($null -eq $di) { '-' } elseif (Prop $di 'resets') { "$($di.resets) RST" } elseif (Prop $di 'sessionsClosed') { "$($di.sessionsClosed) closes" } elseif (Prop $di 'serviceRestartMs') { 'service restart' } else { '-' }
+        $hits = if ($null -eq $di) { '-' }
+                elseif ($null -ne (Prop $di 'resets')) { "$($di.resets) RST" + $(if ((Prop $di 'graceMs')) { " (grace $($di.graceMs) ms)" } else { '' }) }
+                elseif ($null -ne (Prop $di 'sessionsClosed')) { "$($di.sessionsClosed) closes" }
+                elseif ($null -ne (Prop $di 'serviceRestartMs')) { 'service restart' } else { '-' }
         $at = if ($t.triggered) { ("{0}% ({1} ms)" -f $t.percentWrittenAtTrigger, $t.triggerMs) } else { 'not reached' }
         $errs = if ($t.log.errorLines) { ("{0} ({1})" -f $t.log.errorLines, (($t.log.errorCodes | ForEach-Object { "ERROR $($_.code)x$($_.count)" }) -join ', ')) } else { '0' }
         $an = $t.analysis

@@ -1,0 +1,136 @@
+name: Robocopy /Z crash reproduction
+
+# Reproduces robocopy dying (exit 0xC0000005, no summary table) when an SMB session is
+# reset mid-file in restartable (/Z) mode, and compares it with a standard copy.
+# Each matrix job runs the harness on a hosted Windows runner against a loopback SMB share;
+# the compare job merges every trial into one /Z vs no-/Z table in the run summary.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runners:
+        description: 'JSON list of Windows runner labels'
+        default: '["windows-2022", "windows-2025"]'
+        type: string
+      disruptions:
+        description: 'JSON list of disruption methods: tcp-reset-storm, smb-session-close, server-restart, none'
+        default: '["tcp-reset-storm", "smb-session-close"]'
+        type: string
+      trials:
+        description: 'Trials per matrix job (disruption point cycles through trigger_percents)'
+        default: '3'
+        type: string
+      trigger_percents:
+        description: 'Comma-separated percentages of the big file at which to disrupt'
+        default: '25,50,75'
+        type: string
+      file_size_mb:
+        description: 'Size of the big test file in MB'
+        default: '512'
+        type: string
+      storm_seconds:
+        description: 'How long the disruption keeps resetting the connection (should exceed /W)'
+        default: '12'
+        type: string
+      reset_grace_ms:
+        description: 'tcp-reset-storm only: comma-separated ms to let each reconnect live before resetting it (cycles per trial)'
+        default: '0,10,100'
+        type: string
+      retry_args:
+        description: 'robocopy retry options'
+        default: '/R:5 /W:5'
+        type: string
+      extra_args:
+        description: 'Extra robocopy options (for example /MT:8 or /IPG:2)'
+        default: ''
+        type: string
+      procdump:
+        description: 'Crash dump capture: auto (WER LocalDumps, ProcDump only if WER is policy-disabled), on, off'
+        default: 'auto'
+        type: choice
+        options: [auto, 'on', 'off']
+  push:
+    paths:
+      - '.github/workflows/robocopy-crash.yml'
+      - 'scripts/**'
+
+permissions:
+  contents: read
+
+jobs:
+  reproduce:
+    name: ${{ matrix.os }} / ${{ matrix.disruption }} / ${{ matrix.mode }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.runners || '["windows-2022", "windows-2025"]') }}
+        disruption: ${{ fromJSON(inputs.disruptions || '["tcp-reset-storm", "smb-session-close"]') }}
+        mode: [restartable, standard]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      RESULTS: ${{ github.workspace }}\results
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Run robocopy trials (${{ matrix.mode == 'restartable' && 'with /Z' || 'without /Z' }})
+        shell: pwsh
+        run: |
+          $percents = ('${{ inputs.trigger_percents || '25,50,75' }}' -split ',') | ForEach-Object { [int]$_.Trim() }
+          $grace = ('${{ inputs.reset_grace_ms || '0,10,100' }}' -split ',') | ForEach-Object { [int]$_.Trim() }
+          ./scripts/Invoke-RobocopyCrashTest.ps1 `
+            -Mode '${{ matrix.mode }}' `
+            -Disruption '${{ matrix.disruption }}' `
+            -Trials ${{ inputs.trials || 3 }} `
+            -TriggerPercents $percents `
+            -FileSizeMB ${{ inputs.file_size_mb || 512 }} `
+            -StormSeconds ${{ inputs.storm_seconds || 12 }} `
+            -ResetGraceMs $grace `
+            -RetryArgs '${{ inputs.retry_args || '/R:5 /W:5' }}' `
+            -ExtraArgs '${{ inputs.extra_args }}' `
+            -ProcDump '${{ inputs.procdump || 'auto' }}' `
+            -Label '${{ matrix.os }}' `
+            -WorkDir "$env:RUNNER_TEMP\robocopy-crash" `
+            -OutputDir "$env:RESULTS"
+
+      - name: Analyse crash dumps
+        if: always()
+        shell: pwsh
+        run: ./scripts/Invoke-DumpAnalysis.ps1 -ResultsDir "$env:RESULTS" -SymbolCache "$env:RUNNER_TEMP\symbols"
+
+      - name: Job summary
+        if: always()
+        shell: pwsh
+        run: ./scripts/Write-Comparison.ps1 -ResultsDir "$env:RESULTS" -StepSummary
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: results-${{ matrix.os }}-${{ matrix.disruption }}-${{ matrix.mode }}
+          path: ${{ github.workspace }}/results
+          if-no-files-found: warn
+          compression-level: 6
+
+  compare:
+    name: Compare /Z vs standard
+    needs: reproduce
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: results-*
+          path: results
+
+      - name: Build comparison
+        shell: pwsh
+        run: ./scripts/Write-Comparison.ps1 -ResultsDir results -OutFile comparison.md -StepSummary
+
+      - name: Upload comparison
+        uses: actions/upload-artifact@v5
+        with:
+          name: comparison
+          path: comparison.md

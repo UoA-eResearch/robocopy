@@ -103,15 +103,15 @@ The harness creates a share called `rccrash`, writes WER LocalDumps registry val
 
 ## Results so far
 
-First full run (3 trials per cell, 512 MB file, 12 s disruption, `/R:5 /W:5`, resets with no
-grace delay):
+Two full runs on hosted runners (3 trials per cell, 512 MB file, 12 s disruption,
+`/R:5 /W:5`; the second run with reset grace delays of 0, 10 and 100 ms across the trials):
 
 | Runner | robocopy.exe | Disruption | `/Z` trials | no-`/Z` trials |
 |---|---|---|---|---|
-| windows-2022 (Server 2022, 20348) | 10.0.20348.1 | tcp-reset-storm | 3 recovered, 0 crashed | 3 recovered, 0 crashed |
-| windows-2022 | 10.0.20348.1 | smb-session-close | 3 recovered, 0 crashed | 3 recovered, 0 crashed |
-| windows-2025 (Server 2025, 26100) | 10.0.26100.1 | tcp-reset-storm | 3 recovered, 0 crashed | 3 recovered, 0 crashed |
-| windows-2025 | 10.0.26100.1 | smb-session-close | 3 recovered, 0 crashed | 3 recovered, 0 crashed |
+| windows-2022 (Server 2022, 20348) | 10.0.20348.1 | tcp-reset-storm | 6 recovered, 0 crashed | 6 recovered, 0 crashed |
+| windows-2022 | 10.0.20348.1 | smb-session-close | 6 recovered, 0 crashed | 6 recovered, 0 crashed |
+| windows-2025 (Server 2025, 26100) | 10.0.26100.1 | tcp-reset-storm | 6 recovered, 0 crashed | 6 recovered, 0 crashed |
+| windows-2025 | 10.0.26100.1 | smb-session-close | 6 recovered, 0 crashed | 6 recovered, 0 crashed |
 
 What the run showed:
 
@@ -130,10 +130,11 @@ What the run showed:
   the destination file size.
 - `/Z` is much slower even on loopback: 25 % of the file took about 1.6 s with `/Z` versus
   about 0.1 s without.
-- With no grace delay the SMB redirector only attempted 3 reconnects in 12 s, one per
-  robocopy retry; the field capture showed the client reconnecting hundreds of times because
-  each reconnect got through authentication first. `reset_grace_ms` was added after this run
-  to reproduce that.
+- The SMB redirector only attempted 3 reconnects per 12 s window, one per robocopy retry,
+  whether the reset landed 1 ms, 15 ms or 108 ms after the reconnect. The field capture
+  showed the client reconnecting hundreds of times in 10 s, so something on that client
+  (or the redirector's behaviour on Windows 10) retries far more aggressively than the
+  Server builds do here; `/R` and `/W` bound what this harness can generate.
 
 ## Caveats
 

@@ -1,0 +1,116 @@
+# robocopy `/Z` crash reproduction
+
+A GitHub Actions workflow (Windows runners) that reproduces robocopy dying mid-copy when an
+SMB session is reset while it is running in restartable mode (`/Z`), and compares the
+behaviour with and without `/Z`.
+
+## The problem
+
+Large multi-file copies from a Windows 10 client to an SMB file server were failing while an
+upstream network device kept injecting TCP resets into the client's SMB connections for
+roughly ten seconds at a time. Two different failure modes were seen in the robocopy logs:
+
+| Options | What happened |
+|---|---|
+| `/E /Z /R:5 /W:10` | `ERROR 59 (0x0000003B) An unexpected network error occurred`, then `Waiting 10 seconds... Retrying...`. Each retry reconnected, copied for about a second and was reset again. Robocopy stayed alive and eventually gave up or finished. |
+| `/E /Z /R:5 /W:15` | **Robocopy crashed.** Twice, at 21 % and 54 % of a 450 MB file, the prompt came back mid-file with no error line and no summary table, which robocopy never does on a normal exit (even `RETRY LIMIT EXCEEDED` prints the summary). `$LASTEXITCODE` was `-1073741819` (`0xC0000005`, access violation) and the Application log had Event 1000 for `robocopy.exe`. |
+
+The working hypothesis is that a session reset landing mid-file in restartable mode is the
+crash path: the reopen-and-seek code that `/Z` uses to resume a partially copied file hits
+an error it does not handle and the process dies. Nothing is printed because the code that
+would print the error is in the dead process. Without `/Z` the same reset is an ordinary
+error that robocopy reports and retries; the file restarts from zero on the next attempt.
+
+That hypothesis is what this workflow tests.
+
+## What the workflow does
+
+`.github/workflows/robocopy-crash.yml` runs a matrix of Windows runner x disruption method x
+mode (`restartable` = with `/Z`, `standard` = without). Each job runs
+`scripts/Invoke-RobocopyCrashTest.ps1`, which on the runner:
+
+1. Creates an SMB share on the runner and a large source file of random data (default 512 MB,
+   each 1 MB chunk stamped with its index so a resume at the wrong offset changes the hash),
+   plus a handful of small files.
+2. Configures Windows Error Reporting LocalDumps so an unhandled exception in `robocopy.exe`
+   leaves a full user-mode dump (and clears the inherited error mode so WER is reachable).
+   If WER is disabled by policy on the machine, Sysinternals ProcDump is attached instead.
+3. Runs `robocopy <src> \\127.0.0.1\<share> /E /COPY:DAT /DCOPY:T [/Z] /R:5 /W:5`
+   and polls the process's I/O counters until it has written a chosen percentage of the big
+   file (25 %, 50 % and 75 % on successive trials).
+4. Disrupts the SMB session for `storm_seconds` (default 12 s, longer than `/W` so at least
+   one retry lands inside the window):
+   - `tcp-reset-storm` (default): every 2 ms, every client-side TCP connection to port 445 is
+     aborted with `SetTcpEntry(MIB_TCP_STATE_DELETE_TCB)`, which sends a TCP RST to the peer.
+     Each reconnect the SMB redirector makes is reset again, the same shape as a
+     brute-force block on a network device.
+   - `smb-session-close`: `Close-SmbSession -Force` on the server side in a loop.
+   - `server-restart`: restarts the Server (LanmanServer) service once.
+   - `none`: control run.
+5. Waits for robocopy to exit and records, per trial: exit code (signed and hex), whether the
+   summary table was printed, `ERROR n` lines and retry count, the last progress percentage
+   printed before the first error, SHA-256 match of the destination file, Application log
+   Events 1000/1001, SMB client/server event-log entries, the number of resets sent, and any
+   crash dump.
+
+`scripts/Invoke-DumpAnalysis.ps1` then runs `cdb` (`!analyze -v`, exception context, stacks)
+with Microsoft public symbols over any dump, and `scripts/Write-Comparison.ps1` writes the
+per-job summary. The final `compare` job merges every artifact into a single table in the
+run summary and uploads it as `comparison.md`.
+
+## Running it
+
+**Actions > Robocopy /Z crash reproduction > Run workflow.** Defaults: `windows-2022` and
+`windows-2025`, disruptions `tcp-reset-storm` and `smb-session-close`, 3 trials per job,
+512 MB file, 12 s storm. Inputs let you change runners, disruption methods, number of trials,
+trigger percentages, file size, storm length, retry options, extra robocopy options
+(for example `/MT:8` or `/IPG:2`) and the dump-capture mode. The workflow also runs on
+pushes that touch the workflow or `scripts/`.
+
+Artifacts per job: `robocopy.log`, `robocopy.stderr.log`, `events.txt`, `trial.json`,
+`environment.json` and, on a crash, `*.dmp` with `*.analysis.txt` / `*.analysis.json`.
+
+### Running the harness by hand
+
+On any Windows machine, from an elevated PowerShell (5.1 or 7):
+
+```powershell
+.\scripts\Invoke-RobocopyCrashTest.ps1 -Mode restartable -Disruption tcp-reset-storm -Trials 3 -OutputDir .\results-z
+.\scripts\Invoke-RobocopyCrashTest.ps1 -Mode standard    -Disruption tcp-reset-storm -Trials 3 -OutputDir .\results-std
+.\scripts\Invoke-DumpAnalysis.ps1 -ResultsDir .\results-z
+.\scripts\Write-Comparison.ps1 -ResultsDir . -OutFile comparison.md
+```
+
+The harness creates a share called `rccrash`, writes WER LocalDumps registry values for
+`robocopy.exe`, and removes the share when it finishes.
+
+## Reading the comparison
+
+- **Crashed**: exit code outside robocopy's 0 to 16 range, typically `-1073741819`
+  (`0xC0000005`), with no summary table. The dump analysis column names the faulting
+  function inside `robocopy.exe`.
+- **Recovered**: robocopy logged `ERROR 59` / `ERROR 64` lines and retried, then finished with
+  exit code below 8. This is the expected behaviour without `/Z`.
+- **Failed**: exit code 8 or above (retries exhausted).
+- **Clean**: no error at all. If both modes are clean, the disruption never reached robocopy
+  (the SMB redirector reconnected transparently); use a longer `storm_seconds`, a larger
+  file or the other disruption method.
+- **Hash OK**: whether the destination file is byte-identical to the source, which checks
+  that a `/Z` resume actually resumed at the right offset.
+
+## Caveats
+
+- A hosted runner copies over loopback to its own SMB server, so timing differs from a real
+  client and file server, and the reset is injected on the client rather than by a device in
+  the path. The disruption is designed to look the same to robocopy (a TCP RST during a
+  write, then repeated resets of every reconnect), but a non-reproduction here does not prove
+  the field crash cannot happen.
+- Windows Server 2022 / 2025 ship different `robocopy.exe` builds from Windows 10 22H2. The
+  `environment.json` in each artifact records the exact version tested.
+
+## Mitigation while the network problem is being fixed
+
+Drop `/Z` (a mid-file reset then costs a re-copy of that file, not the job), make `/W`
+longer than the block period so a retry does not land inside it, avoid `/MT`, use `/FFT`
+so reruns resume instead of re-copying, log with `/LOG+:` and wrap robocopy in a loop that
+treats any exit code below 0 or 8 and above as "wait, then run again".

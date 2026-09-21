@@ -47,9 +47,14 @@ mode (`restartable` = with `/Z`, `standard` = without). Each job runs
      trial) lets each reconnect live that long before it is reset, so negotiate and
      authentication complete and the copy briefly resumes, as seen from a device that
      resets a few milliseconds after the authenticate.
+     The storm only touches connections to the test server's address; the machine's other
+     SMB sessions are left alone.
    - `smb-session-close`: `Close-SmbSession -Force` on the server side in a loop.
    - `server-restart`: restarts the Server (LanmanServer) service once.
    - `none`: control run.
+   `server_profile: nas` first turns off oplocks, leasing, durable handles and multichannel on
+   the loopback SMB server (and restores them afterwards), so it behaves like a NAS that offers
+   none of those and the redirector cannot recover a reset transparently.
 5. Waits for robocopy to exit and records, per trial: exit code (signed and hex), whether the
    summary table was printed, `ERROR n` lines and retry count, the last progress percentage
    printed before the first error, SHA-256 match of the destination file, Application log
@@ -115,6 +120,7 @@ Three full runs on hosted runners (3 trials per cell, 512 MB file, 12 s disrupti
 | windows-2025 | 10.0.26100.1 | smb-session-close | 9 recovered, 0 crashed | 9 recovered, 0 crashed |
 | windows-11-arm (Windows 11 client, 26200, ARM64) | 10.0.26100.1 | tcp-reset-storm | 3 recovered, 0 crashed | 3 recovered, 0 crashed |
 | windows-11-arm | 10.0.26100.1 | smb-session-close | 3 recovered, 0 crashed | 3 recovered, 0 crashed |
+| Windows 10 21H2 VM (19044, by hand) | 10.0.19041.1 | tcp-reset-storm | 3 recovered, 0 crashed | not run |
 
 What the run showed:
 
@@ -123,11 +129,11 @@ What the run showed:
   was logged at the trigger percentage, robocopy waited `/W`, retried inside the window, was
   hit again, and finished once the window ended. Exit code 1, summary table printed,
   destination hash correct, in both modes.
-- No crash, no Event 1000, no dump, on either Server build or on the Windows 11 ARM64
-  client build, in either mode. The `/Z` crash seen in the field on Windows 10 22H2
-  (robocopy 10.0.19041) was not reproduced by a loopback reset on these builds. That is evidence, not proof: the hosted runners cannot
-  run the Windows 10 binary, so run the harness by hand on a Windows 10 machine (see above)
-  to test the exact build.
+- No crash, no Event 1000, no dump, on either Server build, on the Windows 11 ARM64
+  client build, or on a Windows 10 21H2 VM running the harness by hand with the same
+  robocopy 10.0.19041.1 binary as the field machine. A mid-file reset in `/Z` mode is handled
+  cleanly by every build tested, so the field crash is not a generic `/Z` reopen bug; it needs
+  something the loopback setup does not provide (see "What is still different" below).
 - With `/Z` the destination file is pre-extended to its full size as soon as the copy starts,
   which is why the harness measures progress from the process's I/O counters rather than
   the destination file size.
@@ -140,6 +146,20 @@ What the run showed:
   showed the client reconnecting hundreds of times in 10 s, so something on that client
   (or the redirector's behaviour on Windows 10) retries far more aggressively than the
   Server builds do here; `/R` and `/W` bound what this harness can generate.
+
+### What is still different from the field
+
+- **Reconnect storm.** Against the loopback server the redirector reconnects once per robocopy
+  retry and then hands robocopy a clean error. The field capture showed the client
+  reconnecting hundreds of times in 10 s, each reconnect getting through negotiate and
+  authentication before the reset. That gives robocopy many more failure moments per file,
+  including ones that land inside the `/Z` restart-record writes rather than the data writes.
+  `reset_grace_ms` reproduces the timing of each reset but not the client's reconnect loop.
+- **Server behaviour.** The field NAS grants no oplocks and returned authentication failures
+  on some sessions; the Windows SMB server grants oplocks, leases and durable handles and never
+  fails authentication. `server_profile: nas` removes the first difference.
+- **Sample size.** The field crash happened twice in a run of many files. A few dozen trials
+  cannot rule out a race with a low per-reset probability.
 
 ## Caveats
 

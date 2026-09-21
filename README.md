@@ -121,6 +121,7 @@ Three full runs on hosted runners (3 trials per cell, 512 MB file, 12 s disrupti
 | windows-11-arm (Windows 11 client, 26200, ARM64) | 10.0.26100.1 | tcp-reset-storm | 3 recovered, 0 crashed | 3 recovered, 0 crashed |
 | windows-11-arm | 10.0.26100.1 | smb-session-close | 3 recovered, 0 crashed | 3 recovered, 0 crashed |
 | Windows 10 21H2 VM (19044, by hand) | 10.0.19041.1 | tcp-reset-storm | 3 recovered, 0 crashed | not run |
+| windows-2022, `server_profile: nas`, 20 ms grace | 10.0.20348.1 | tcp-reset-storm | 3 recovered, 0 crashed | 3 recovered, 0 crashed |
 
 What the run showed:
 
@@ -157,7 +158,8 @@ What the run showed:
   `reset_grace_ms` reproduces the timing of each reset but not the client's reconnect loop.
 - **Server behaviour.** The field NAS grants no oplocks and returned authentication failures
   on some sessions; the Windows SMB server grants oplocks, leases and durable handles and never
-  fails authentication. `server_profile: nas` removes the first difference.
+  fails authentication. `server_profile: nas` removes the first difference; with it applied
+  (oplocks, leasing, multichannel off, durable-handle timeout 0) robocopy still recovered.
 - **Sample size.** The field crash happened twice in a run of many files. A few dozen trials
   cannot rule out a race with a low per-reset probability.
 

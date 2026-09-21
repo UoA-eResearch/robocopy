@@ -44,6 +44,11 @@ on:
         description: 'Extra robocopy options (for example /MT:8 or /IPG:2)'
         default: ''
         type: string
+      server_profile:
+        description: 'Loopback SMB server profile: default, or nas (no oplocks/leases/durable handles, single channel)'
+        default: 'default'
+        type: choice
+        options: [default, nas]
       procdump:
         description: 'Crash dump capture: auto (WER LocalDumps, ProcDump only if WER is policy-disabled), on, off'
         default: 'auto'
@@ -89,6 +94,7 @@ jobs:
             -RetryArgs '${{ inputs.retry_args || '/R:5 /W:5' }}' `
             -ExtraArgs '${{ inputs.extra_args }}' `
             -ProcDump '${{ inputs.procdump || 'auto' }}' `
+            -ServerProfile '${{ inputs.server_profile || 'default' }}' `
             -Label '${{ matrix.os }}' `
             -WorkDir "$env:RUNNER_TEMP\robocopy-crash" `
             -OutputDir "$env:RESULTS"
@@ -107,7 +113,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v5
         with:
-          name: results-${{ matrix.os }}-${{ matrix.disruption }}-${{ matrix.mode }}
+          name: results-${{ matrix.os }}-${{ matrix.disruption }}-${{ matrix.mode }}${{ inputs.server_profile == 'nas' && '-nas' || '' }}
           path: ${{ github.workspace }}/results
           if-no-files-found: warn
           compression-level: 6

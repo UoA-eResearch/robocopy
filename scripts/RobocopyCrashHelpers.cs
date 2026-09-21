@@ -93,22 +93,32 @@ public static class RcNet
         }
     }
 
-    /// Count the client-side connections to the given remote port (for diagnostics).
-    public static int CountConnections(int port)
+    static bool AddrMatches(uint dwAddr, string[] targets)
+    {
+        if (targets == null || targets.Length == 0) return true;
+        string a = Addr(dwAddr);
+        foreach (var t in targets) if (t == a) return true;
+        return false;
+    }
+
+    /// Count the client-side connections to the given remote port and target addresses (for diagnostics).
+    public static int CountConnections(int port, string[] targets)
     {
         int n = 0;
         foreach (var row in GetRows())
-            if (Port(row.dwRemotePort) == port && row.dwState != MIB_TCP_STATE_LISTEN && row.dwState != MIB_TCP_STATE_TIME_WAIT) n++;
+            if (Port(row.dwRemotePort) == port && AddrMatches(row.dwRemoteAddr, targets)
+                && row.dwState != MIB_TCP_STATE_LISTEN && row.dwState != MIB_TCP_STATE_TIME_WAIT) n++;
         return n;
     }
 
     /// For durationMs, every intervalMs, abort every TCP connection whose remote port is `port`
-    /// (i.e. every client-side SMB connection when port == 445). Each new reconnect the SMB
-    /// redirector makes is reset again, like a brute-force block on a security device.
+    /// and whose remote address is one of `targets` (the test server only - never the machine's
+    /// other SMB sessions). Each new reconnect the SMB redirector makes is reset again, like a
+    /// brute-force block on a security device.
     /// graceMs > 0 leaves each connection alone until it has existed for that long, so the
     /// reconnect can finish negotiate/session setup (and even copy a little) before the reset
     /// lands - the pattern seen from a network device that resets shortly after authentication.
-    public static StormResult Storm(int port, int durationMs, int intervalMs, bool includeServerSide, int graceMs)
+    public static StormResult Storm(int port, string[] targets, int durationMs, int intervalMs, int graceMs)
     {
         var result = new StormResult();
         var sw = Stopwatch.StartNew();
@@ -122,8 +132,8 @@ public static class RcNet
             foreach (var row in rows)
             {
                 int rp = Port(row.dwRemotePort), lp = Port(row.dwLocalPort);
-                bool match = rp == port || (includeServerSide && lp == port);
-                if (!match) continue;
+                if (rp != port) continue;
+                if (!AddrMatches(row.dwRemoteAddr, targets)) continue;
                 if (row.dwState == MIB_TCP_STATE_LISTEN || row.dwState == MIB_TCP_STATE_TIME_WAIT) continue;
                 if (graceMs > 0)
                 {

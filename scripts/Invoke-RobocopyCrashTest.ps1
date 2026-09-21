@@ -49,6 +49,11 @@ param(
     [string]$OutputDir = (Join-Path (Get-Location) 'results'),
     [string]$ShareName = 'rccrash',
     [string]$ServerName = '127.0.0.1',
+    # default: leave the loopback SMB server as it is. nas: make it behave like a NAS that grants
+    # no oplocks, leases or durable handles and uses a single channel, so a reset cannot be
+    # recovered transparently by the redirector and every reconnect goes through robocopy.
+    [ValidateSet('default', 'nas')]
+    [string]$ServerProfile = 'default',
     # Seconds to wait for the write threshold before disrupting anyway.
     [int]$TriggerTimeoutSeconds = 90,
     # Seconds to wait for robocopy to finish after the disruption.
@@ -109,18 +114,61 @@ function Initialize-Share([string]$Path) {
     if (Get-SmbShare -Name $ShareName -ErrorAction SilentlyContinue) {
         Remove-SmbShare -Name $ShareName -Force -Confirm:$false
     }
-    New-SmbShare -Name $ShareName -Path $Path -FullAccess 'Everyone' -CachingMode None | Out-Null
+    $shareArgs = @{ Name = $ShareName; Path = $Path; FullAccess = 'Everyone'; CachingMode = 'None' }
+    if ($ServerProfile -eq 'nas') { $shareArgs.LeasingMode = 'None' }
+    New-SmbShare @shareArgs | Out-Null
     $unc = "\\$ServerName\$ShareName"
-    Write-Step "Share $unc -> $Path"
+    Write-Step "Share $unc -> $Path (profile $ServerProfile)"
     # Prove the share is reachable over the loopback SMB path before starting.
     $probe = Join-Path $unc '.probe'
     Set-Content -Path $probe -Value 'ok'
     Remove-Item $probe -Force
     $conn = Get-SmbConnection -ServerName $ServerName -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($conn) { Write-Step ("SMB connection: dialect {0}, user {1}" -f $conn.Dialect, $conn.UserName) }
-    $tcp = [RcNet]::CountConnections(445)
-    Write-Step "Client-side TCP connections to port 445: $tcp"
+    $tcp = [RcNet]::CountConnections(445, [string[]]$script:TargetAddresses)
+    Write-Step ("Client-side TCP connections to {0}:445: {1}" -f ($script:TargetAddresses -join '/'), $tcp)
     return $unc
+}
+
+function Get-TargetAddresses([string]$Server) {
+    # IPv4 addresses of the test server; the reset storm only ever touches connections to these.
+    $ip = $null
+    if ([System.Net.IPAddress]::TryParse($Server, [ref]$ip) -and $ip.AddressFamily -eq 'InterNetwork') { return @($ip.ToString()) }
+    $addrs = @([System.Net.Dns]::GetHostAddresses($Server) | Where-Object { $_.AddressFamily -eq 'InterNetwork' } | ForEach-Object { $_.ToString() })
+    if (-not $addrs) { throw "No IPv4 address for $Server; the reset storm needs one" }
+    return $addrs
+}
+
+$script:SmbServerSettingNames = @('EnableOplocks', 'EnableLeasing', 'EnableMultiChannel', 'DurableHandleV2TimeoutInSeconds', 'EnableSMB1Protocol')
+function Get-SmbServerSnapshot {
+    $cfg = Get-SmbServerConfiguration -ErrorAction SilentlyContinue
+    $snap = [ordered]@{}
+    foreach ($n in $script:SmbServerSettingNames) { if ($cfg -and $cfg.PSObject.Properties[$n]) { $snap[$n] = $cfg.$n } }
+    return $snap
+}
+function Set-SmbServerProfile([string]$Profile) {
+    $before = Get-SmbServerSnapshot
+    if ($Profile -eq 'nas') {
+        $wanted = @{ EnableOplocks = $false; EnableLeasing = $false; EnableMultiChannel = $false; DurableHandleV2TimeoutInSeconds = 0 }
+        foreach ($k in $wanted.Keys) {
+            if (-not $before.Contains($k)) { continue }
+            $setting = @{ $k = $wanted[$k] }
+            try { Set-SmbServerConfiguration @setting -Force -ErrorAction Stop } catch { Write-Warning "Could not set $k=$($wanted[$k]): $($_.Exception.Message)" }
+        }
+        $state = ((Get-SmbServerSnapshot).GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ' '
+        Write-Step "SMB server profile nas: $state"
+    }
+    return $before
+}
+function Restore-SmbServerSettings($Snapshot) {
+    if (-not $Snapshot -or $Snapshot.Count -eq 0) { return }
+    $now = Get-SmbServerSnapshot
+    foreach ($k in @($Snapshot.Keys)) {
+        if ($now.Contains($k) -and $now[$k] -ne $Snapshot[$k]) {
+            $setting = @{ $k = $Snapshot[$k] }
+            try { Set-SmbServerConfiguration @setting -Force -ErrorAction Stop } catch { Write-Warning "Could not restore $k" }
+        }
+    }
 }
 
 function Initialize-SourceData([string]$Src, [int]$SizeMB, [int]$SmallCount) {
@@ -202,11 +250,11 @@ function Invoke-Disruption([string]$Kind, [int]$Seconds, [int]$GraceMs) {
     $sw = [Diagnostics.Stopwatch]::StartNew()
     switch ($Kind) {
         'tcp-reset-storm' {
-            # Abort every client-side TCP connection to port 445 every 2 ms for the window.
-            $r = [RcNet]::Storm(445, $Seconds * 1000, 2, $false, $GraceMs)
+            # Abort every client-side TCP connection to the test server's port 445 every 2 ms for the window.
+            $r = [RcNet]::Storm(445, [string[]]$script:TargetAddresses, $Seconds * 1000, 2, $GraceMs)
             $first = if ($r.Records.Count) { $r.Records[0].ElapsedMs } else { $null }
             return [ordered]@{
-                kind = $Kind; durationMs = $r.DurationMs; iterations = $r.Iterations; graceMs = $GraceMs
+                kind = $Kind; durationMs = $r.DurationMs; iterations = $r.Iterations; graceMs = $GraceMs; targets = @($script:TargetAddresses)
                 resets = $r.Resets; failures = $r.Failures; firstResetMs = $first
                 sample = @($r.Records | Select-Object -First 25 | ForEach-Object {
                         [ordered]@{ t = $_.ElapsedMs; local = "$($_.LocalAddr):$($_.LocalPort)"; remote = "$($_.RemoteAddr):$($_.RemotePort)"; state = $_.State; result = $_.Result } })
@@ -292,7 +340,7 @@ function Get-EventsSince([datetime]$Since, [string]$OutFile) {
         try {
             $ev = Get-WinEvent -FilterHashtable @{ LogName = $log; StartTime = $Since } -ErrorAction Stop
             if ($log -eq 'Application') { $ev = $ev | Where-Object { ($_.ProviderName -in @('Application Error', 'Windows Error Reporting', 'Application Hang')) -or ($_.Message -match 'robocopy') } }
-            $all += @($ev | ForEach-Object { [ordered]@{ time = $_.TimeCreated.ToString('o'); log = $log; id = $_.Id; level = $_.LevelDisplayName; provider = $_.ProviderName; message = $_.Message } })
+            $all += @($ev | ForEach-Object { [pscustomobject]@{ time = $_.TimeCreated.ToString('o'); log = $log; id = $_.Id; level = $_.LevelDisplayName; provider = $_.ProviderName; message = $_.Message } })
         } catch { }
     }
     $all = @($all | Sort-Object { $_.time })
@@ -332,8 +380,9 @@ $dstDir = Join-Path $WorkDir 'dst'
 $dumpDir = Join-Path $WorkDir 'dumps'
 $toolDir = Join-Path $WorkDir 'tools'
 
+$script:TargetAddresses = Get-TargetAddresses $ServerName
 $envInfo = Get-EnvironmentInfo
-$envInfo.mode = $Mode; $envInfo.disruption = $Disruption
+$envInfo.mode = $Mode; $envInfo.disruption = $Disruption; $envInfo.serverProfile = $ServerProfile; $envInfo.targetAddresses = @($script:TargetAddresses)
 Write-Step ("{0} build {1}, robocopy {2}" -f $envInfo.osProductName, $envInfo.osBuild, $envInfo.robocopyVersion)
 
 $werInfo = Initialize-CrashDumps $dumpDir
@@ -343,6 +392,9 @@ $envInfo.wer = $werInfo; $envInfo.procDumpMode = $ProcDump; $envInfo.procDumpAtt
 $envInfo | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $OutputDir 'environment.json')
 $big = Initialize-SourceData $srcDir $FileSizeMB $SmallFiles
 $bigHash = (Get-FileHash $big -Algorithm SHA256).Hash
+$smbSnapshot = Set-SmbServerProfile $ServerProfile
+$envInfo.smbServerConfig = (Get-SmbServerSnapshot)
+$envInfo | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $OutputDir 'environment.json')
 $unc = Initialize-Share $dstDir
 
 $modeArg = if ($Mode -eq 'restartable') { '/Z' } else { '' }
@@ -465,6 +517,7 @@ try {
     }
 } finally {
     if (-not $KeepShare) { Remove-SmbShare -Name $ShareName -Force -Confirm:$false -ErrorAction SilentlyContinue }
+    Restore-SmbServerSettings $smbSnapshot
 }
 
 $results | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $OutputDir 'results.json')
